@@ -3,6 +3,8 @@ package main
 import (
 	"fmt"
 	"math/rand/v2"
+	"strconv"
+
 	// "math/rand/v2"
 	"net/http"
 	"time"
@@ -20,15 +22,16 @@ var upgrader = websocket.Upgrader{
 
 type client struct {
 	conn     *websocket.Conn
-	send     chan []byte
+	send     chan float64
 	sendTime chan int
+	sendCrash chan float64
 }
 
-var timerDoneChan = make(chan string, 2)
 var register = make(chan *client)
 var gameStartTimerBroadcast = make(chan int)
-var startTimer = make(chan int)
-var multiplierCount = make(chan string)
+var startTimer = make(chan int, 2)
+var crashedAt = make(chan float64)
+var multiplierCount = make(chan float64)
 var clients = make(map[*client]bool)
 
 func main() {
@@ -48,8 +51,9 @@ func handleWs(w http.ResponseWriter, r *http.Request) {
 
 	c := &client{
 		conn:     conn,
-		send:     make(chan []byte),
+		send:     make(chan float64),
 		sendTime: make(chan int),
+		sendCrash: make(chan float64),
 	}
 
 	fmt.Println("New client connected:", c.conn.RemoteAddr())
@@ -63,16 +67,11 @@ func handleTimer() {
 		count = 5
 		fmt.Println("Waiting for timer to start...")
 		select {
-		case <-timerDoneChan:
-			fmt.Println("Timer done, resetting count.")
-
-			count = 5
 		case <-startTimer:
 			for {
 				fmt.Println("Game starting in:", count)
 				if count <= 0 {
 					gameStartTimerBroadcast <- 5
-					timerDoneChan <- "done"
 					break
 				}
 				count--
@@ -84,12 +83,18 @@ func handleTimer() {
 			randomMultipierStop := generateRandomMultiplier()
 			for{
 				if(multiplier >= float64(randomMultipierStop)) {
+					crashedAt <- multiplier
+					startTimer <- 1
 					break
 				}
-				multiplier += 0.1
-				readableMultiplier := fmt.Sprintf("%.2f", multiplier)
+				multiplier += 0.01
+				readableMultiplier, err := strconv.ParseFloat(fmt.Sprintf("%.2f", multiplier), 64)
+				if err != nil {
+					fmt.Println("Error parsing multiplier:", err)
+					continue
+				}
 				multiplierCount <- readableMultiplier
-				time.Sleep(400 * time.Millisecond)
+				time.Sleep(100 * time.Millisecond)
 			}
 		}
 	}
@@ -106,7 +111,11 @@ func timerLogger() {
 			}
 		case multiplier := <-multiplierCount:
 			for cl := range clients {
-				cl.send <- []byte(multiplier)
+				cl.send <- multiplier
+			}
+		case crashed := <-crashedAt:
+			for cl := range clients {
+				cl.sendCrash <- crashed
 			}
 		}
 	}
@@ -116,10 +125,14 @@ func writePump(c *client) {
 	for {
 		select {
 		case msg := <-c.send:
-			fmt.Println("Sending message to client:", string(msg))
+			fmt.Println("Sending message to client:", msg, c.conn.RemoteAddr())
+			c.conn.WriteJSON(map[string]interface{}{"message": msg, "type": "multiplier"})
 		case count := <-c.sendTime:
-			c.conn.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf("Timer count: %d", count)))
+			c.conn.WriteJSON(map[string]interface{}{"message":  count, "type": "timer"})
 			fmt.Println("Sending timer count to client:", count)
+		case crash := <-c.sendCrash:
+			c.conn.WriteJSON(map[string]interface{}{"message": crash, "type": "crash"})
+			fmt.Println("Sending crash info to client:", crash)
 		}
 	}
 }
