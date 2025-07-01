@@ -66,7 +66,7 @@ func handleWs(w http.ResponseWriter, r *http.Request) {
 		Send:      make(chan float64),
 		SendTime:  make(chan int),
 		SendCrash: make(chan float64),
-		IsFlying:  true,
+		IsFlying:  false,
 	}
 
 	// defer func() {
@@ -176,7 +176,6 @@ func (c *client) writePump() {
 			}
 		case count := <-c.SendTime:
 			err := c.Conn.WriteJSON(map[string]interface{}{"message": count, "type": "timer"})
-			c.IsFlying = true
 			if err != nil {
 				fmt.Println("Error Sending message to client:", err)
 				return
@@ -192,6 +191,7 @@ func (c *client) writePump() {
 			c.CanCashOut = false
 			if c.IsAwaitingBet {
 				c.IsAwaitingBet = false
+				c.IsFlying = true
 				c.CanCashOut = true
 			} else {
 				c.BetAmount = 0
@@ -233,6 +233,7 @@ func (c *client) readPump() {
 				if multiplier == 1.0 && clientMsg.Intent == "bet" {
 					c.BetAmount = clientMsg.Amount
 					c.IsAwaitingBet = false
+					c.IsFlying = true
 					c.CanCashOut = true // NOTE: dont forget to reset on crash or stop
 					continue
 				}
